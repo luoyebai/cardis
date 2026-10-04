@@ -1,0 +1,9 @@
+/build/
+/.deps/
+/.vs/
+*.user
+/.codex/
+/.agents/
+/.aws/
+/.env
+/.env.*

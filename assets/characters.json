@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "players": ["hitori_gotoh", "anon_chihaya"],
+  "groups": [
+    {"id": "kessoku_band", "name": "结束乐队", "category": "乐队"},
+    {"id": "mygo", "name": "MyGO!!!!!", "category": "乐队"}
+  ],
+  "characters": [
+    {
+      "id": "hitori_gotoh", "name": "后藤一里", "original_name": "後藤ひとり", "title": "吉他英雄",
+      "group_id": "kessoku_band", "gender": "female", "species": "人类", "origin": "孤独摇滚！",
+      "occupation": "高中生 / 主音吉他手",
+      "biography": "结束乐队的主音吉他手。性格内向，但拥有扎实的吉他演奏实力。",
+      "source_url": "https://bocchi.rocks/omnibus/character/hitori.html",
+      "portrait": "portraits/hitori.png", "artist": "官方角色视觉图",
+      "license": "Copyright retained by original rights holders; no redistribution license granted",
+      "tags": ["吉他", "内向", "专注"],
+      "gameplay": {"role": "爆发 / 自保", "starting_life": 30, "max_mana": 10,
+                   "skill_ids": ["ember_arc", "moon_veil", "star_bloom"]}
+    },
+    {
+      "id": "anon_chihaya", "name": "千早爱音", "original_name": "千早愛音", "title": "追光的吉他手",
+      "group_id": "mygo", "gender": "female", "species": "人类", "origin": "BanG Dream! It's MyGO!!!!!",
+      "occupation": "高中生 / 吉他手",
+      "biography": "羽丘女子学园的高中一年级学生。善于交际、行动力强，喜欢尝试流行事物。",
+      "source_url": "https://anime.bang-dream.com/mygo/character/anon/",
+      "portrait": "portraits/anon.png", "artist": "BanG Dream! 官方角色视觉图",
+      "license": "Copyright retained by original rights holders; no redistribution license granted",
+      "tags": ["吉他", "社交", "行动力"],
+      "gameplay": {"role": "支援 / 持续", "starting_life": 30, "max_mana": 10,
+                   "skill_ids": ["spotlight_riff", "together_beat", "encore_smile"]}
+    }
+  ]
+}
