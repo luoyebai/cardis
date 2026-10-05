@@ -15,9 +15,31 @@ enum class PlayerId { FIRST, SECOND };
 enum class Phase { MAIN, COMBAT, END, FINISHED };
 enum class CardKind { SKILL, CHARACTER };
 enum class Row { FRONT, BACK };
-enum class StackKind { CAST, ATTACK };
+enum class StackKind { CAST, ATTACK, TRIGGER };
 enum class EffectKind { DAMAGE, HEAL, SHIELD };
-enum class EventKind { CAST, PASSED, RESOLVED, PREVENTED, PHASE_CHANGED, GAME_OVER, ATTACKED, MOVED, DRAWN, DIED };
+enum class EffectTiming { ON_RESOLVE, END_OF_TURN };
+enum class EffectRecipient { SELECTED, CONTROLLER, OPPONENT };
+enum class EventKind {
+    CAST,
+    PASSED,
+    RESOLVED,
+    PREVENTED,
+    PHASE_CHANGED,
+    GAME_OVER,
+    ATTACKED,
+    MOVED,
+    DRAWN,
+    DIED,
+    SCHEDULED,
+    TRIGGERED
+};
+
+struct EffectStep {
+    EffectKind effect = EffectKind::DAMAGE;
+    int amount = 1;
+    EffectTiming timing = EffectTiming::ON_RESOLVE;
+    EffectRecipient recipient = EffectRecipient::SELECTED;
+};
 
 struct CardDefinition {
     std::string id;
@@ -35,11 +57,21 @@ struct CardDefinition {
     int health = 0;
     bool guard = false;
     bool haste = false;
+    std::vector<EffectStep> effects;
 };
 
 struct Target {
     PlayerId player = PlayerId::FIRST;
     std::uint64_t unit = 0;  // Zero identifies the player's hero.
+};
+
+struct ScheduledEffect {
+    std::uint64_t id = 0;
+    std::size_t card = 0;
+    PlayerId controller = PlayerId::FIRST;
+    Target target;
+    EffectStep effect;
+    std::uint64_t due_turn = 0;
 };
 
 struct UnitState {
@@ -75,6 +107,7 @@ struct StackItem {
     StackKind kind = StackKind::CAST;
     std::uint64_t attacker = 0;
     Row row = Row::FRONT;
+    EffectStep triggered_effect;
 };
 
 struct GameEvent {
@@ -93,6 +126,7 @@ struct GameState {
     std::optional<PlayerId> winner;
     std::string result;
     std::vector<StackItem> stack;
+    std::vector<ScheduledEffect> scheduled_effects;
     std::vector<GameEvent> events;
 };
 
@@ -104,6 +138,7 @@ struct ActionResult {
 [[nodiscard]] PlayerId Opponent(PlayerId player) noexcept;
 [[nodiscard]] std::size_t Index(PlayerId player) noexcept;
 void ValidateCards(const std::vector<CardDefinition>& cards);
+[[nodiscard]] std::vector<EffectStep> EffectsOf(const CardDefinition& card);
 
 // Owns all rule mutations. UI and Cordis may only submit commands and read snapshots.
 class Game {
@@ -130,6 +165,8 @@ class Game {
     [[nodiscard]] bool validTarget(Target target) const;
     [[nodiscard]] bool legalAttackTarget(PlayerId player, Target target) const;
     void applyDamage(Target target, int amount);
+    void applyEffect(Target target, const EffectStep& effect);
+    void enqueueEndTriggers();
     void resolveTop();
     void advancePhase();
     void draw(PlayerId player);
@@ -141,6 +178,7 @@ class Game {
     GameState initial_state_;
     std::uint64_t next_stack_id_ = 1;
     std::uint64_t next_unit_id_ = 1;
+    std::uint64_t next_scheduled_id_ = 1;
 };
 
 }  // namespace cardis

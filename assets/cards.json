@@ -1,12 +1,16 @@
 {
   "schema_version": 1,
   "cards": [
-    {"id":"ember_arc","name":"失真独奏","character_id":"hitori_gotoh","cost":2,"effect":"damage","amount":3},
+    {"id":"ember_arc","name":"失真独奏","character_id":"hitori_gotoh","cost":2,"effects":[
+      {"effect":"damage","amount":2,"timing":"on_resolve","recipient":"selected"},
+      {"effect":"damage","amount":1,"timing":"end_of_turn","recipient":"selected"}]},
     {"id":"moon_veil","name":"纸箱结界","character_id":"hitori_gotoh","cost":1,"effect":"shield","amount":3},
     {"id":"star_bloom","name":"纽带和弦","character_id":"hitori_gotoh","cost":2,"effect":"heal","amount":4},
     {"id":"spotlight_riff","name":"追光拨弦","character_id":"anon_chihaya","cost":1,"effect":"damage","amount":2},
     {"id":"together_beat","name":"并肩节拍","character_id":"anon_chihaya","cost":2,"effect":"shield","amount":4},
-    {"id":"encore_smile","name":"安可笑容","character_id":"anon_chihaya","cost":1,"effect":"heal","amount":2},
+    {"id":"encore_smile","name":"安可笑容","character_id":"anon_chihaya","cost":1,"effects":[
+      {"effect":"heal","amount":1,"timing":"on_resolve","recipient":"selected"},
+      {"effect":"shield","amount":1,"timing":"end_of_turn","recipient":"selected"}]},
     {"id":"hitori_on_stage","name":"后藤一里","character_id":"hitori_gotoh","kind":"character","cost":4,"attack":4,"health":4},
     {"id":"anon_on_stage","name":"千早爱音","character_id":"anon_chihaya","kind":"character","cost":3,"attack":2,"health":5,"guard":true},
     {"id":"morning_messenger","name":"晨光信使·铃","kind":"character","cost":1,"attack":1,"health":2},

@@ -253,14 +253,28 @@ bool Button(const Typography& type, Rectangle bounds, const std::string& label, 
     return pressed && enabled;
 }
 
-Color EffectColor(cardis::EffectKind kind) {
-    return kind == cardis::EffectKind::DAMAGE ? ACCENT_PINK : kind == cardis::EffectKind::SHIELD ? CYAN : CREAM;
+std::string StepText(const cardis::EffectStep& step) {
+    const std::string recipient = step.recipient == cardis::EffectRecipient::CONTROLLER ? "己方"
+                                  : step.recipient == cardis::EffectRecipient::OPPONENT ? "对方"
+                                                                                        : "目标";
+    return recipient +
+           (step.effect == cardis::EffectKind::DAMAGE ? "伤害"
+            : step.effect == cardis::EffectKind::HEAL ? "治疗"
+                                                      : "护盾") +
+           std::to_string(step.amount);
+}
+std::string TimedEffects(const cardis::CardDefinition& card, cardis::EffectTiming timing) {
+    std::string value;
+    for (const auto& step : cardis::EffectsOf(card)) {
+        if (step.timing == timing) {
+            value += (value.empty() ? "" : " / ") + StepText(step);
+        }
+    }
+    return value.empty() ? "无" : value;
 }
 std::string EffectDescription(const cardis::CardDefinition& card) {
-    const auto amount = std::to_string(card.amount);
-    return card.effect == cardis::EffectKind::DAMAGE   ? "对敌方目标造成 " + amount + " 点伤害"
-           : card.effect == cardis::EffectKind::SHIELD ? "友方目标获得 " + amount + " 点护盾"
-                                                       : "为友方目标恢复 " + amount + " 点生命";
+    return "当前：" + TimedEffects(card, cardis::EffectTiming::ON_RESOLVE) + "；回合末：" +
+           TimedEffects(card, cardis::EffectTiming::END_OF_TURN);
 }
 
 std::string GenderLabel(cardis::Gender gender) {
@@ -373,8 +387,53 @@ bool CanPlayCard(const cardis::Game& game, std::size_t index) {
     }
     return false;
 }
+bool CanAttackWith(const cardis::Game& game, std::uint64_t unit) {
+    const auto player = game.state().priority;
+    const auto enemy = cardis::Opponent(player);
+    if (game.canAttack(player, unit, {enemy, 0}).accepted) {
+        return true;
+    }
+    for (const auto& target : game.state().players[cardis::Index(enemy)].battlefield) {
+        if (game.canAttack(player, unit, {enemy, target.id}).accepted) {
+            return true;
+        }
+    }
+    return false;
+}
+bool HasAction(const cardis::Game& game) {
+    const auto& player = game.state().players[cardis::Index(game.state().priority)];
+    for (std::size_t i = 0; i < player.hand.size(); ++i) {
+        if (CanPlayCard(game, i)) {
+            return true;
+        }
+    }
+    for (const auto& unit : player.battlefield) {
+        if (CanAttackWith(game, unit.id) || game.canMove(game.state().priority, unit.id).accepted) {
+            return true;
+        }
+    }
+    return false;
+}
+std::string PhaseName(cardis::Phase phase) {
+    return phase == cardis::Phase::MAIN     ? "主要阶段"
+           : phase == cardis::Phase::COMBAT ? "战斗阶段"
+           : phase == cardis::Phase::END    ? "结束阶段"
+                                            : "对局结束";
+}
+std::string PassLabel(const cardis::GameState& state) {
+    if (!state.stack.empty()) {
+        return state.consecutive_passes == 0 ? "让对手响应" : "确认结算";
+    }
+    if (state.consecutive_passes == 0) {
+        return "让过优先权";
+    }
+    return state.phase == cardis::Phase::MAIN     ? "进入战斗"
+           : state.phase == cardis::Phase::COMBAT ? "进入结束阶段"
+                                                  : "结束回合";
+}
+std::string MessageLabel(std::string label);
 void DrawCharacterPane(const Typography& type, Portraits& portraits, const cardis::CharacterRoster& roster,
-                       cardis::PlayerId& inspected, bool& details) {
+                       cardis::PlayerId& inspected, bool& details, bool& timeline) {
     Panel({28, 86, 238, 574}, Color{37, 29, 46, 255});
     if (Button(type, {40, 98, 98, 38}, "P1", inspected == cardis::PlayerId::FIRST)) {
         inspected = cardis::PlayerId::FIRST;
@@ -404,7 +463,9 @@ void DrawCharacterPane(const Typography& type, Portraits& portraits, const cardi
     type.fit("选牌后点目标", 44, 732, 208, 18, MUTED);
     type.fit("选前排后攻击", 44, 768, 208, 18, MUTED);
     type.fit("右键取消选择", 44, 804, 208, 18, MUTED);
-    type.fit("双方让过结算", 44, 840, 208, 18, CYAN);
+    if (Button(type, {40, 838, 214, 32}, "结算与记录")) {
+        timeline = true;
+    }
 }
 void DrawPlayer(const Typography& type, const cardis::Game& game, const cardis::CharacterRoster& roster,
                 cardis::PlayerId id, float y, const Selection& selection, TargetClick& click, bool interactive) {
@@ -412,7 +473,11 @@ void DrawPlayer(const Typography& type, const cardis::Game& game, const cardis::
     const auto& player = state.players[cardis::Index(id)];
     const auto& character = roster.character(player.character_id);
     const Rectangle bounds{284, y, 848, 81};
-    const bool legal = CanTarget(game, selection, {id, 0}).accepted;
+    const bool placement =
+        selection.hand >= 0 &&
+        game.cards()[state.players[cardis::Index(state.priority)].hand[static_cast<std::size_t>(selection.hand)]]
+                .kind == cardis::CardKind::CHARACTER;
+    const bool legal = !placement && CanTarget(game, selection, {id, 0}).accepted;
     Panel(bounds, id == state.priority ? Color{40, 34, 50, 255} : PANEL);
     if (legal) {
         DrawRectangleRoundedLinesEx(bounds, 0.08F, 12, 2, CYAN);
@@ -424,7 +489,10 @@ void DrawPlayer(const Typography& type, const cardis::Game& game, const cardis::
                  "  ·  墓地 " + std::to_string(player.graveyard.size()),
              300, y + 46, 549, 18, MUTED);
     type.fit("护盾 " + std::to_string(player.shield), 853, y + 46, 255, 18, CREAM);
-    if (Clicked(bounds, interactive) && (selection.hand >= 0 || selection.unit != 0)) {
+    if ((selection.hand >= 0 || selection.unit != 0) && !legal) {
+        DrawRectangleRec(bounds, Fade(BACKGROUND, 0.20F));
+    }
+    if (Clicked(bounds, interactive) && !placement && (selection.hand >= 0 || selection.unit != 0)) {
         click = {true, {id, 0}, cardis::Row::FRONT};
     }
 }
@@ -448,7 +516,11 @@ void DrawRow(const Typography& type, const cardis::Game& game, cardis::PlayerId 
         const bool legal = (empty == placement) && CanTarget(game, selection, target, row).accepted;
         Panel(bounds, row == cardis::Row::FRONT ? Color{36, 33, 49, 255} : Color{25, 31, 44, 255});
         const bool selected = !empty && selection.unit == units[column]->id;
-        if (legal || selected) {
+        const bool ready = !empty && owner == game.state().priority && CanAttackWith(game, units[column]->id);
+        const bool movable =
+            !empty && owner == game.state().priority && game.canMove(owner, units[column]->id).accepted;
+        const bool focused = selection.hand >= 0 || selection.unit != 0;
+        if (legal || selected || (!focused && (ready || movable))) {
             DrawRectangleRoundedLinesEx(bounds, 0.08F, 12, 2, selected ? ACCENT_PINK : CYAN);
         }
         if (empty) {
@@ -471,17 +543,20 @@ void DrawRow(const Typography& type, const cardis::Game& game, cardis::PlayerId 
                                                                                     : "就绪";
             type.fit(std::to_string(card.attack) + "攻 / " + std::to_string(card.health - unit.damage) + "血" +
                          (unit.shield > 0 ? " 护" + std::to_string(unit.shield) : "") + " · " + condition,
-                     bounds.x + 13, y + 46, 250, 18, unit.exhausted ? MUTED : CYAN);
+                     bounds.x + 13, y + 46, 250, 18, ready || legal ? CYAN : MUTED);
+        }
+        if (focused && !selected && !legal) {
+            DrawRectangleRec(bounds, Fade(BACKGROUND, 0.22F));
         }
         if (Clicked(bounds, interactive)) {
             if (selection.hand >= 0 || (selection.unit != 0 && owner != game.state().priority)) {
                 if (!empty || placement) {
                     click = {true, target, row};
                 }
-            } else if (!empty && owner == game.state().priority) {
+            } else if (ready || movable) {
                 selection.hand = -1;
                 selection.unit = units[column]->id;
-                message = "选择敌方目标攻击，或点击换排。";
+                message = ready ? "选择敌方目标攻击。" : "点击右侧按钮换排。";
             }
         }
     }
@@ -509,31 +584,38 @@ void DrawHand(const Typography& type, const cardis::Game& game, Selection& selec
         const bool selected = selection.hand == static_cast<int>(i);
         const bool available = CanPlayCard(game, i);
         Panel(bounds, selected ? Color{55, 39, 57, 255} : PANEL);
-        if (selected || available) {
+        const bool focused = selection.hand >= 0 || selection.unit != 0;
+        if (selected || (available && !focused)) {
             DrawRectangleRoundedLinesEx(bounds, 0.08F, 12, selected ? 2.0F : 1.0F, selected ? ACCENT_PINK : CYAN);
         }
-        type.fit(card.name, bounds.x + 13, bounds.y + 9, 202, 20);
+        type.fit(card.name, bounds.x + 13, bounds.y + 9, 202, 20, available ? INK : MUTED);
         DrawCircle(static_cast<int>(bounds.x + 242), static_cast<int>(bounds.y + 23), 20, available ? CYAN : BORDER);
         type.text(std::to_string(card.cost), bounds.x + 234, bounds.y + 6, 21, available ? BACKGROUND : INK);
         if (card.kind == cardis::CardKind::CHARACTER) {
             type.fit("角色 · " + std::to_string(card.attack) + "攻 / " + std::to_string(card.health) + "血",
-                     bounds.x + 13, bounds.y + 53, 244, 18, CYAN);
+                     bounds.x + 13, bounds.y + 53, 244, 18, available ? CYAN : MUTED);
             type.fit(std::string(card.guard ? "守护  " : "") + (card.haste ? "疾奏  " : "") + "前后排可放置",
                      bounds.x + 13, bounds.y + 89, 244, 18, MUTED);
         } else {
-            type.fit("即时技能 · " + std::to_string(card.amount) +
-                         (card.effect == cardis::EffectKind::DAMAGE ? " 伤害"
-                          : card.effect == cardis::EffectKind::HEAL ? " 治疗"
-                                                                    : " 护盾"),
-                     bounds.x + 13, bounds.y + 53, 244, 18, EffectColor(card.effect));
-            type.fit(card.effect == cardis::EffectKind::DAMAGE ? "目标：敌方角色或玩家" : "目标：友方角色或玩家",
-                     bounds.x + 13, bounds.y + 89, 244, 18, MUTED);
+            type.fit("当前：" + TimedEffects(card, cardis::EffectTiming::ON_RESOLVE), bounds.x + 13, bounds.y + 53, 244,
+                     18, available ? INK : MUTED);
+            type.fit("回合末：" + TimedEffects(card, cardis::EffectTiming::END_OF_TURN), bounds.x + 13, bounds.y + 89,
+                     244, 18, MUTED);
         }
         type.fit(selected    ? "已选择 · 点击目标"
                  : available ? "点击选择"
                              : "暂不可用",
                  bounds.x + 13, bounds.y + 126, 244, 18, selected ? ACCENT_PINK : MUTED);
-        if (Clicked(bounds, interactive)) {
+        if (focused && !selected) {
+            DrawRectangleRec(bounds, Fade(BACKGROUND, 0.22F));
+        }
+        if (!available && interactive && CheckCollisionPointRec(GetMousePosition(), bounds)) {
+            message = player.mana < card.cost ? "灵力不足，等待自己的下回合恢复。"
+                      : card.kind == cardis::CardKind::CHARACTER
+                          ? MessageLabel(game.canCast(player_id, i, cardis::Target{player_id, 0}).error)
+                          : "当前没有合法目标。";
+        }
+        if (Clicked(bounds, interactive && available)) {
             selection.unit = 0;
             selection.hand = selected ? -1 : static_cast<int>(i);
             message = card.kind == cardis::CardKind::CHARACTER ? "点击己方前排或后排的空位。" : EffectDescription(card);
@@ -541,6 +623,22 @@ void DrawHand(const Typography& type, const cardis::Game& game, Selection& selec
     }
     if (player.hand.empty()) {
         type.text("手牌已用尽。下回合开始时抽牌。", 309, 770, 23, MUTED);
+    }
+    // Full effect text remains available even when compact card summaries are ellipsized.
+    for (std::size_t i = start; interactive && i < std::min(start + 4, player.hand.size()); ++i) {
+        const auto& card = game.cards()[player.hand[i]];
+        if (card.kind != cardis::CardKind::SKILL ||
+            !CheckCollisionPointRec(GetMousePosition(), {284 + static_cast<float>(i - start) * 286, 712, 270, 162})) {
+            continue;
+        }
+        Panel({590, 384, 530, 272}, Color{40, 36, 53, 255});
+        type.fit(card.name + " · 完整效果", 608, 400, 496, 21, INK);
+        int line = 0;
+        for (const auto& effect : cardis::EffectsOf(card)) {
+            type.fit(std::string(effect.timing == cardis::EffectTiming::ON_RESOLVE ? "当前结算：" : "回合末：") +
+                         StepText(effect),
+                     608, 447 + static_cast<float>(line++) * 44, 496, 18, MUTED);
+        }
     }
 }
 std::string MessageLabel(std::string label) {
@@ -572,6 +670,9 @@ std::string MessageLabel(std::string label) {
             label.replace(position, from.size(), to);
         }
     };
+    replace(" scheduled an end-of-turn effect", " 已登记回合末效果");
+    replace(" end-of-turn effect entered the stack", " 回合末效果已入栈");
+    replace(" for turn ", "，触发回合 ");
     replace(" entered the stack", " 已入栈");
     replace(" declared an attack", " 宣告攻击");
     replace(" moved and became exhausted", " 换排并横置");
@@ -589,26 +690,125 @@ std::string MessageLabel(std::string label) {
     replace("Phase advanced", "进入下一阶段");
     return label;
 }
+std::string TargetLabel(const cardis::Game& game, cardis::Target target) {
+    const std::string owner = "P" + std::to_string(cardis::Index(target.player) + 1);
+    if (target.unit == 0) {
+        return owner + " 玩家";
+    }
+    for (const auto& unit : game.state().players[cardis::Index(target.player)].battlefield) {
+        if (unit.id == target.unit) {
+            return owner + " · " + game.cards()[unit.card].name;
+        }
+    }
+    return owner + " · 目标已离场 #" + std::to_string(target.unit);
+}
+void DrawTimeline(const Typography& type, const cardis::Game& game, bool& open, int& tab, int& page) {
+    const auto& state = game.state();
+    DrawRectangle(0, 0, WIDTH, HEIGHT, Fade(BLACK, 0.83F));
+    Panel({170, 94, 1100, 712});
+    type.text("结算与记录", 205, 114, 28, ACCENT_PINK);
+    if (Button(type, {1110, 112, 130, 40}, "关闭")) {
+        open = false;
+    }
+    const std::array<std::string, 3> labels{"当前响应栈", "回合末待触发", "对局记录"};
+    for (int i = 0; i < 3; ++i) {
+        if (Button(type, {204 + static_cast<float>(i) * 348, 173, 324, 43}, labels[static_cast<std::size_t>(i)],
+                   tab == i)) {
+            tab = i;
+            page = 0;
+        }
+    }
+    const std::size_t count = tab == 0   ? state.stack.size()
+                              : tab == 1 ? state.scheduled_effects.size()
+                                         : state.events.size();
+    const int per_page = tab == 2 ? 6 : 2;
+    const int pages = std::max(1, (static_cast<int>(count) + per_page - 1) / per_page);
+    if (CheckCollisionPointRec(GetMousePosition(), {170, 220, 1100, 486})) {
+        page -= static_cast<int>(GetMouseWheelMove());
+    }
+    page = std::clamp(page, 0, pages - 1);
+    const auto begin = static_cast<std::size_t>(page * per_page);
+    for (std::size_t index = begin; index < std::min(count, begin + static_cast<std::size_t>(per_page)); ++index) {
+        const float y = 242 + static_cast<float>(index - begin) * (tab == 2 ? 74.0F : 216.0F);
+        if (tab == 2) {
+            const auto& event = state.events[count - index - 1];
+            type.wrapped("#" + std::to_string(event.sequence) + "  " + MessageLabel(event.message), 208, y, 1020, 2, 18,
+                         MUTED);
+            continue;
+        }
+        const auto card_index = tab == 0 ? state.stack[count - index - 1].card : state.scheduled_effects[index].card;
+        const auto& card = game.cards()[card_index];
+        const auto controller =
+            tab == 0 ? state.stack[count - index - 1].controller : state.scheduled_effects[index].controller;
+        const auto target = tab == 0 ? state.stack[count - index - 1].target : state.scheduled_effects[index].target;
+        const std::string due =
+            tab == 1 ? " · 第 " + std::to_string(state.scheduled_effects[index].due_turn) + " 回合末" : "";
+        Panel({201, y - 3, 1038, 199}, Color{35, 33, 48, 255});
+        type.fit(std::to_string(index + 1) + ". " + card.name + " · P" + std::to_string(cardis::Index(controller) + 1) +
+                     " 施放" + due,
+                 215, y + 7, 1006, 20, INK);
+        type.fit("目标：" + TargetLabel(game, target), 215, y + 48, 1006, 18, CYAN);
+        std::string description;
+        if (tab == 1) {
+            description = "回合末触发：" + StepText(state.scheduled_effects[index].effect);
+        } else {
+            const auto& item = state.stack[count - index - 1];
+            if (item.kind == cardis::StackKind::ATTACK) {
+                description = "攻击 · 双方确认后进行攻击结算。";
+            } else if (item.kind == cardis::StackKind::TRIGGER) {
+                description = "回合末触发 · 可响应：" + StepText(item.triggered_effect);
+            } else if (card.kind == cardis::CardKind::CHARACTER) {
+                description = std::string("角色登场 · ") + (item.row == cardis::Row::FRONT ? "前排" : "后排") + " · " +
+                              std::to_string(card.attack) + " 攻击 / " + std::to_string(card.health) + " 生命";
+            } else {
+                description = EffectDescription(card);
+            }
+        }
+        type.wrapped(description, 215, y + 93, 1006, 3, 18, MUTED);
+    }
+    if (count == 0) {
+        type.text(tab == 0   ? "当前没有待响应的结算。"
+                  : tab == 1 ? "当前没有登记的回合末效果。"
+                             : "尚无对局记录。",
+                  210, 294, 23, MUTED);
+    }
+    if (Button(type, {204, 733, 144, 41}, "上一页", false, page > 0)) {
+        --page;
+    }
+    type.fit(std::to_string(page + 1) + " / " + std::to_string(pages) + " 页 · 共 " + std::to_string(count) + " 项",
+             466, 740, 575, 18, MUTED);
+    if (Button(type, {1096, 733, 144, 41}, "下一页", false, page < pages - 1)) {
+        ++page;
+    }
+}
 void DrawSidebar(const Typography& type, const cardis::Game& game) {
     const auto& state = game.state();
     Panel({1150, 299, 262, 178});
-    type.text("结算栈 · " + std::to_string(state.stack.size()), 1164, 307, 20, ACCENT_PINK);
+    type.fit("当前响应栈 · " + std::to_string(state.stack.size()), 1164, 307, 234, 18, ACCENT_PINK);
     if (state.stack.empty()) {
         type.text("等待出牌或攻击", 1164, 371, 18, MUTED);
     }
     int index = 0;
-    for (auto it = state.stack.rbegin(); it != state.stack.rend() && index < 3; ++it, ++index) {
+    for (auto it = state.stack.rbegin(); it != state.stack.rend() && index < 2; ++it, ++index) {
         const auto& card = game.cards()[it->card];
-        type.fit(
-            std::to_string(index + 1) + ". " + (it->kind == cardis::StackKind::ATTACK ? "攻击 · " : "") + card.name,
-            1164, 350 + static_cast<float>(index) * 38, 234, 18, index == 0 ? INK : MUTED);
+        type.fit(std::to_string(index + 1) + ". " + card.name, 1164, 347 + static_cast<float>(index) * 67, 234, 18,
+                 index == 0 ? INK : MUTED);
+        const std::string kind = it->kind == cardis::StackKind::ATTACK    ? "攻击"
+                                 : it->kind == cardis::StackKind::TRIGGER ? "触发"
+                                                                          : "施放";
+        type.fit(kind + " → " + TargetLabel(game, it->target), 1164, 379 + static_cast<float>(index) * 67, 234, 18,
+                 MUTED);
     }
     Panel({1150, 489, 262, 171});
-    type.text("最近记录", 1164, 499, 20);
-    const auto count = std::min<std::size_t>(3, state.events.size());
-    for (std::size_t i = 0; i < count; ++i) {
-        type.fit(MessageLabel(state.events[state.events.size() - count + i].message), 1164,
-                 541 + static_cast<float>(i) * 36, 233, 18, MUTED);
+    type.fit("回合末待触发 · " + std::to_string(state.scheduled_effects.size()), 1164, 499, 234, 18, CREAM);
+    if (state.scheduled_effects.empty()) {
+        type.text("暂无延迟效果", 1164, 545, 18, MUTED);
+        type.wrapped("攻击在当前响应栈结算", 1164, 591, 234, 2, 18, MUTED);
+    } else {
+        const auto& effect = state.scheduled_effects.front();
+        type.fit(game.cards()[effect.card].name, 1164, 540, 234, 18);
+        type.fit(TargetLabel(game, effect.target), 1164, 578, 234, 18, MUTED);
+        type.fit("T" + std::to_string(effect.due_turn) + "末 · " + StepText(effect.effect), 1164, 616, 234, 18, CREAM);
     }
 }
 void SeedBattleDemo(cardis::Game& game, bool leave_stack) {
@@ -651,12 +851,63 @@ void SeedBattleDemo(cardis::Game& game, bool leave_stack) {
         }
     }
 }
+void SeedDelayedDemo(cardis::Game& game) {
+    for (int step = 0; step < 360 && game.state().phase != cardis::Phase::FINISHED; ++step) {
+        const auto player = game.state().priority;
+        const auto& hand = game.state().players[cardis::Index(player)].hand;
+        if (game.state().stack.empty() && game.state().phase != cardis::Phase::END) {
+            for (std::size_t i = 0; i < hand.size(); ++i) {
+                const auto effects = cardis::EffectsOf(game.cards()[hand[i]]);
+                if (std::none_of(effects.begin(), effects.end(), [](const auto& effect) {
+                        return effect.timing == cardis::EffectTiming::END_OF_TURN;
+                    })) {
+                    continue;
+                }
+                for (const auto target : {cardis::PlayerId::FIRST, cardis::PlayerId::SECOND}) {
+                    if (!game.canCast(player, i, cardis::Target{target, 0}).accepted) {
+                        continue;
+                    }
+                    const auto result = game.cast(player, i, cardis::Target{target, 0});
+                    if (!result.accepted) {
+                        throw std::runtime_error(result.error);
+                    }
+                    for (int pass = 0; pass < 2; ++pass) {
+                        if (!game.pass(game.state().priority).accepted) {
+                            throw std::runtime_error("Delayed smoke could not pass");
+                        }
+                    }
+                    if (game.state().scheduled_effects.empty()) {
+                        throw std::runtime_error("Delayed smoke did not schedule an effect");
+                    }
+                    return;
+                }
+            }
+        }
+        if (!game.pass(player).accepted) {
+            throw std::runtime_error("Delayed smoke could not advance");
+        }
+    }
+    throw std::runtime_error("No legal delayed card found for smoke test");
+}
 int Run(const std::filesystem::path& manifest, const std::string& mode, const std::string& screenshot) {
     auto runtime = cardis::CreateRuntime(manifest);
     auto& game = runtime->require<cardis::Game>();
     const auto& roster = runtime->require<cardis::CharacterRoster>();
-    if (mode == "--smoke-stack" || mode == "--smoke-battle" || mode == "--smoke-small") {
+    if (mode == "--smoke-stack" || mode == "--smoke-battle" || mode == "--smoke-small" || mode == "--smoke-focus" ||
+        mode == "--smoke-turn") {
         SeedBattleDemo(game, mode == "--smoke-stack");
+    }
+    if (mode == "--smoke-delayed" || mode == "--smoke-timeline") {
+        SeedDelayedDemo(game);
+    }
+    if (mode == "--smoke-turn") {
+        const auto turn = game.state().turn;
+        for (int i = 0; i < 20 && game.state().turn == turn; ++i) {
+            static_cast<void>(game.pass(game.state().priority));
+        }
+        if (game.state().turn == turn) {
+            throw std::runtime_error("Turn smoke failed to advance");
+        }
     }
     if (mode == "--smoke-p2") {
         static_cast<void>(game.pass(game.state().priority));
@@ -672,11 +923,47 @@ int Run(const std::filesystem::path& manifest, const std::string& mode, const st
     std::string message = "选择手牌，再点击目标或空位。";
     Selection selection;
     int page = 0;
+    if (mode == "--smoke-focus") {
+        const auto& hand = game.state().players[cardis::Index(game.state().priority)].hand;
+        for (std::size_t i = 0; i < hand.size(); ++i) {
+            if (CanPlayCard(game, i)) {
+                selection.hand = static_cast<int>(i);
+                page = static_cast<int>(i / 4);
+                break;
+            }
+        }
+        if (selection.hand < 0) {
+            throw std::runtime_error("Focus smoke has no legal card");
+        }
+    }
     int frames = 0;
     auto previous_player = game.state().priority;
     auto inspected = game.state().priority;
     bool details = mode == "--smoke-profile";
+    bool timeline = mode == "--smoke-timeline";
+    int timeline_tab = timeline ? 1 : 0;
+    int timeline_page = 0;
+    auto previous_turn = game.state().turn - (mode == "--smoke-turn" ? 1U : 0U);
+    auto previous_phase = game.state().phase;
+    double handoff_until = -1;
+    double phase_until = -1;
     while (!WindowShouldClose()) {
+        const double presentation_time = smoke ? 1.0 : GetTime();
+        if (game.state().turn != previous_turn) {
+            handoff_until = presentation_time + (smoke ? 1.8 : 3.0);
+            previous_turn = game.state().turn;
+            selection.clear();
+            details = false;
+            timeline = false;
+        }
+        if (game.state().phase != previous_phase) {
+            phase_until = presentation_time + 0.8;
+            previous_phase = game.state().phase;
+        }
+        if (game.state().phase == cardis::Phase::FINISHED) {
+            handoff_until = -1;
+        }
+        const bool handoff = presentation_time < handoff_until;
         if (previous_player != game.state().priority) {
             selection.clear();
             page = 0;
@@ -691,8 +978,8 @@ int Run(const std::filesystem::path& manifest, const std::string& mode, const st
         canvas.begin();
         type.setViewport(canvas.scale(), canvas.origin());
         const auto& state = game.state();
-        const bool interactive = !details && state.phase != cardis::Phase::FINISHED;
-        if (details) {
+        const bool interactive = !details && !timeline && !handoff && state.phase != cardis::Phase::FINISHED;
+        if (details || timeline || handoff) {
             GuiLock();
         }
         if (interactive && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
@@ -700,11 +987,27 @@ int Run(const std::filesystem::path& manifest, const std::string& mode, const st
         }
         DrawRectangleGradientH(0, 0, WIDTH, 73, Color{39, 28, 44, 255}, BACKGROUND);
         type.text("C A R D I S", 29, 17, 28);
-        type.text("乐队对决 · 本地双人", 301, 25, 18, MUTED);
-        type.fit("回合 " + std::to_string(state.turn) + " · P" + std::to_string(cardis::Index(state.active) + 1), 793,
-                 24, 268, 20, ACCENT_PINK);
+        const std::string actor = "P" + std::to_string(cardis::Index(state.priority) + 1);
+        const std::string action = state.phase == cardis::Phase::FINISHED ? "对局结束"
+                                   : handoff                              ? "回合交接中"
+                                   : selection.hand >= 0                  ? "请选择目标 / 放置位置"
+                                   : selection.unit != 0                  ? "请选择攻击目标 / 换排"
+                                   : !HasAction(game)                     ? "暂无可用行动 · 请让过"
+                                   : !state.stack.empty()                 ? "响应窗口 · 可出牌或让过"
+                                                                          : "选择高亮手牌或角色";
+        const float pulse = static_cast<float>(std::clamp((phase_until - presentation_time) / 0.8, 0.0, 1.0));
+        Panel({284, 7, 848, 68},
+              Color{static_cast<unsigned char>(35 + 28 * pulse), static_cast<unsigned char>(31 + 16 * pulse),
+                    static_cast<unsigned char>(46 + 18 * pulse), 255});
+        type.fit(actor + " · " + action, 302, 9, 811, 22, ACCENT_PINK);
+        type.fit("回合 " + std::to_string(state.turn) + " · " + PhaseName(state.phase) + " · 双方确认 " +
+                     std::to_string(state.consecutive_passes) + "/2",
+                 302, 43, 811, 18, MUTED);
         const bool restart = Button(type, {1197, 18, 215, 39}, "重新开始");
-        DrawCharacterPane(type, portraits, roster, inspected, details);
+        DrawCharacterPane(type, portraits, roster, inspected, details, timeline);
+        if (selection.hand >= 0 || selection.unit != 0) {
+            DrawRectangleRec({28, 86, 238, 574}, Fade(BACKGROUND, 0.16F));
+        }
         TargetClick target;
         DrawPlayer(type, game, roster, cardis::PlayerId::SECOND, 86, selection, target, interactive);
         DrawRow(type, game, cardis::PlayerId::SECOND, cardis::Row::BACK, 184, selection, target, interactive, message);
@@ -714,13 +1017,9 @@ int Run(const std::filesystem::path& manifest, const std::string& mode, const st
         DrawRow(type, game, cardis::PlayerId::FIRST, cardis::Row::BACK, 481, selection, target, interactive, message);
         DrawPlayer(type, game, roster, cardis::PlayerId::FIRST, 579, selection, target, interactive);
         Panel({1150, 86, 262, 200});
-        const std::string phase = state.phase == cardis::Phase::MAIN     ? "主要阶段"
-                                  : state.phase == cardis::Phase::COMBAT ? "战斗阶段"
-                                  : state.phase == cardis::Phase::END    ? "结束阶段"
-                                                                         : "对局结束";
-        type.text(phase, 1166, 100, 22, CYAN);
+        type.text(PhaseName(state.phase), 1166, 100, 22, CYAN);
         type.text("P" + std::to_string(cardis::Index(state.priority) + 1) + " 持有优先权", 1166, 141, 18, MUTED);
-        const bool pass = Button(type, {1162, 184, 238, 43}, "让过优先权 →", true, interactive);
+        const bool pass = Button(type, {1162, 184, 238, 43}, PassLabel(state), true, interactive);
         const bool move =
             Button(type, {1162, 239, 238, 34}, "所选角色换排", false,
                    interactive && selection.unit != 0 && game.canMove(state.priority, selection.unit).accepted);
@@ -730,7 +1029,26 @@ int Run(const std::filesystem::path& manifest, const std::string& mode, const st
         if (details) {
             DrawCharacterDetails(type, portraits, roster, game, inspected, details);
         }
-        if (state.phase == cardis::Phase::FINISHED && !details) {
+        if (timeline) {
+            DrawTimeline(type, game, timeline, timeline_tab, timeline_page);
+        }
+        if (handoff) {
+            DrawRectangle(0, 0, WIDTH, HEIGHT, Fade(BACKGROUND, 0.86F));
+            Panel({364, 221, 712, 437}, Color{40, 34, 52, 255});
+            const auto next = "P" + std::to_string(cardis::Index(state.active) + 1);
+            type.fit("P" + std::to_string(cardis::Index(cardis::Opponent(state.active)) + 1) + " 回合结束", 406, 255,
+                     626, 26, MUTED);
+            type.fit(next + " 准备行动", 406, 318, 626, 34, ACCENT_PINK);
+            type.text(std::to_string(static_cast<int>(std::ceil(handoff_until - presentation_time))), 676, 389, 69,
+                      CREAM);
+            type.fit("准备好后可跳过，接下来由你行动。", 406, 512, 626, 18, MUTED);
+            DrawRectangleRounded({406, 555, static_cast<float>((handoff_until - presentation_time) / 3.0) * 626, 5},
+                                 0.4F, 8, ACCENT_PINK);
+            if (Button(type, {406, 581, 626, 48}, "准备好了 · 空格跳过", true) || IsKeyPressed(KEY_SPACE)) {
+                handoff_until = -1;
+            }
+        }
+        if (state.phase == cardis::Phase::FINISHED && !details && !timeline) {
             DrawRectangle(270, 173, 872, 399, Fade(BLACK, 0.88F));
             type.text(state.winner ? "P" + std::to_string(cardis::Index(*state.winner) + 1) + " 获胜" : "平局", 569,
                       287, 38, ACCENT_PINK);
@@ -740,6 +1058,10 @@ int Run(const std::filesystem::path& manifest, const std::string& mode, const st
         // Defer commands until drawing is complete, preserving every reference used above.
         if (restart) {
             game.reset();
+            previous_turn = game.state().turn;
+            previous_phase = game.state().phase;
+            handoff_until = -1;
+            phase_until = -1;
             selection.clear();
             page = 0;
             message = "新的对局已开始。";

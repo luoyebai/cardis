@@ -10,6 +10,9 @@ namespace cardis {
 namespace {
 bool ValidPlayer(PlayerId player) { return Index(player) < 2; }
 bool ValidRow(Row row) { return row == Row::FRONT || row == Row::BACK; }
+bool ValidEffect(EffectKind effect) {
+    return effect == EffectKind::DAMAGE || effect == EffectKind::HEAL || effect == EffectKind::SHIELD;
+}
 std::size_t RowCount(const PlayerState& player, Row row) {
     return static_cast<std::size_t>(std::count_if(player.battlefield.begin(), player.battlefield.end(),
                                                   [row](const auto& unit) { return unit.row == row; }));
@@ -19,6 +22,10 @@ std::size_t RowCount(const PlayerState& player, Row row) {
 PlayerId Opponent(PlayerId player) noexcept { return player == PlayerId::FIRST ? PlayerId::SECOND : PlayerId::FIRST; }
 std::size_t Index(PlayerId player) noexcept { return static_cast<std::size_t>(player); }
 
+std::vector<EffectStep> EffectsOf(const CardDefinition& card) {
+    return card.effects.empty() ? std::vector<EffectStep>{{card.effect, card.amount}} : card.effects;
+}
+
 void ValidateCards(const std::vector<CardDefinition>& cards) {
     if (cards.empty() || cards.size() > 128) {
         throw std::invalid_argument("Card catalog must contain 1..128 cards");
@@ -26,13 +33,33 @@ void ValidateCards(const std::vector<CardDefinition>& cards) {
     std::set<std::string> ids;
     for (const auto& card : cards) {
         if (card.id.empty() || card.name.empty() || !ids.insert(card.id).second || card.cost < 0 || card.cost > 10 ||
-            (card.kind != CardKind::SKILL && card.kind != CardKind::CHARACTER) ||
-            (card.effect != EffectKind::DAMAGE && card.effect != EffectKind::HEAL &&
-             card.effect != EffectKind::SHIELD) ||
+            (card.kind != CardKind::SKILL && card.kind != CardKind::CHARACTER) || !ValidEffect(card.effect) ||
+            card.effects.size() > 4 || (card.kind == CardKind::CHARACTER && !card.effects.empty()) ||
             (card.kind == CardKind::SKILL && (card.amount < 1 || card.amount > 100)) ||
             (card.kind == CardKind::CHARACTER &&
              (card.attack < 0 || card.attack > 100 || card.health < 1 || card.health > 100))) {
             throw std::invalid_argument("Invalid card rules: " + card.id);
+        }
+        if (card.kind == CardKind::SKILL) {
+            std::optional<bool> selected_enemy;
+            for (const auto& effect : EffectsOf(card)) {
+                if (!ValidEffect(effect.effect) || effect.amount < 1 || effect.amount > 100 ||
+                    (effect.timing != EffectTiming::ON_RESOLVE && effect.timing != EffectTiming::END_OF_TURN) ||
+                    (effect.recipient != EffectRecipient::SELECTED && effect.recipient != EffectRecipient::CONTROLLER &&
+                     effect.recipient != EffectRecipient::OPPONENT)) {
+                    throw std::invalid_argument("Invalid skill effect: " + card.id);
+                }
+                if (effect.recipient == EffectRecipient::SELECTED) {
+                    const bool enemy = effect.effect == EffectKind::DAMAGE;
+                    if (selected_enemy.has_value() && selected_enemy.value() != enemy) {
+                        throw std::invalid_argument("Selected effects must share a target side: " + card.id);
+                    }
+                    selected_enemy = enemy;
+                }
+            }
+            if (!selected_enemy.has_value()) {
+                throw std::invalid_argument("Skills require at least one selected-target effect: " + card.id);
+            }
         }
     }
 }
@@ -95,6 +122,7 @@ void Game::reset() {
     state_ = initial_state_;
     next_stack_id_ = 1;
     next_unit_id_ = 1;
+    next_scheduled_id_ = 1;
 }
 const UnitState* Game::findUnit(Target target) const {
     if (!ValidPlayer(target.player) || target.unit == 0) {
@@ -141,9 +169,13 @@ ActionResult Game::canCast(PlayerId player, std::size_t hand_index, Target targe
                 return {false, "That named character is already on your battlefield"};
             }
         }
-    } else if ((card.effect == EffectKind::DAMAGE && target.player != Opponent(player)) ||
-               (card.effect != EffectKind::DAMAGE && target.player != player)) {
-        return {false, "This skill cannot target that side"};
+    } else {
+        for (const auto& effect : EffectsOf(card)) {
+            if (effect.recipient == EffectRecipient::SELECTED &&
+                target.player != (effect.effect == EffectKind::DAMAGE ? Opponent(player) : player)) {
+                return {false, "This skill cannot target that side"};
+            }
+        }
     }
     return {true, {}};
 }
@@ -158,7 +190,7 @@ ActionResult Game::cast(PlayerId player, std::size_t hand_index, Target target, 
     auto& owner = state_.players[Index(player)];
     const auto card_index = owner.hand[hand_index];
     const auto& card = cards_[card_index];
-    state_.stack.push_back({next_stack_id_++, card_index, player, target, StackKind::CAST, 0, row});
+    state_.stack.push_back({next_stack_id_++, card_index, player, target, StackKind::CAST, 0, row, {}});
     owner.mana -= card.cost;
     owner.hand.erase(owner.hand.begin() + static_cast<std::ptrdiff_t>(hand_index));
     state_.consecutive_passes = 0;
@@ -205,7 +237,7 @@ ActionResult Game::attack(PlayerId player, std::uint64_t attacker, Target target
     }
     auto* unit = findUnit({player, attacker});
     unit->exhausted = true;
-    state_.stack.push_back({next_stack_id_++, unit->card, player, target, StackKind::ATTACK, attacker, unit->row});
+    state_.stack.push_back({next_stack_id_++, unit->card, player, target, StackKind::ATTACK, attacker, unit->row, {}});
     state_.consecutive_passes = 0;
     record(EventKind::ATTACKED, cards_[unit->card].name + " declared an attack");
     return {true, {}};
@@ -275,13 +307,57 @@ void Game::applyDamage(Target target, int amount) {
     }
 }
 
+void Game::applyEffect(Target target, const EffectStep& effect) {
+    auto* unit = findUnit(target);
+    auto& owner = state_.players[Index(target.player)];
+    switch (effect.effect) {
+        case EffectKind::DAMAGE:
+            applyDamage(target, effect.amount);
+            break;
+        case EffectKind::HEAL:
+            if (unit != nullptr) {
+                unit->damage = std::max(0, unit->damage - effect.amount);
+            } else {
+                owner.life = std::min(owner.max_life, owner.life + effect.amount);
+            }
+            break;
+        case EffectKind::SHIELD:
+            if (unit != nullptr) {
+                unit->shield += effect.amount;
+            } else {
+                owner.shield += effect.amount;
+            }
+            break;
+    }
+}
+
+void Game::enqueueEndTriggers() {
+    // APNAP: active player's objects enter first. LIFO therefore resolves the other player's group first.
+    // Reverse registration within each group makes earlier registered effects resolve earlier for that owner.
+    for (const auto controller : {state_.active, Opponent(state_.active)}) {
+        for (auto it = state_.scheduled_effects.rbegin(); it != state_.scheduled_effects.rend(); ++it) {
+            if (it->due_turn <= state_.turn && it->controller == controller) {
+                state_.stack.push_back({next_stack_id_++, it->card, controller, it->target, StackKind::TRIGGER, 0,
+                                        Row::FRONT, it->effect});
+                record(EventKind::TRIGGERED, cards_[it->card].name + " end-of-turn effect entered the stack");
+            }
+        }
+    }
+    std::erase_if(state_.scheduled_effects, [this](const auto& effect) { return effect.due_turn <= state_.turn; });
+}
+
 void Game::resolveTop() {
     const auto item = state_.stack.back();
     state_.stack.pop_back();
     const auto& card = cards_[item.card];
     auto& owner = state_.players[Index(item.controller)];
     bool resolved = true;
-    if (item.kind == StackKind::ATTACK) {
+    if (item.kind == StackKind::TRIGGER) {
+        resolved = validTarget(item.target);
+        if (resolved) {
+            applyEffect(item.target, item.triggered_effect);
+        }
+    } else if (item.kind == StackKind::ATTACK) {
         const auto* source = findUnit({item.controller, item.attacker});
         resolved = source != nullptr && source->row == Row::FRONT && legalAttackTarget(item.controller, item.target);
         if (resolved) {
@@ -307,26 +383,22 @@ void Game::resolveTop() {
     } else {
         resolved = validTarget(item.target);
         if (resolved) {
-            auto* unit = findUnit(item.target);
-            auto& target_owner = state_.players[Index(item.target.player)];
-            switch (card.effect) {
-                case EffectKind::DAMAGE:
-                    applyDamage(item.target, card.amount);
-                    break;
-                case EffectKind::HEAL:
-                    if (unit != nullptr) {
-                        unit->damage = std::max(0, unit->damage - card.amount);
-                    } else {
-                        target_owner.life = std::min(target_owner.max_life, target_owner.life + card.amount);
-                    }
-                    break;
-                case EffectKind::SHIELD:
-                    if (unit != nullptr) {
-                        unit->shield += card.amount;
-                    } else {
-                        target_owner.shield += card.amount;
-                    }
-                    break;
+            for (const auto& effect : EffectsOf(card)) {
+                Target target = item.target;
+                if (effect.recipient == EffectRecipient::CONTROLLER) {
+                    target = {item.controller};
+                } else if (effect.recipient == EffectRecipient::OPPONENT) {
+                    target = {Opponent(item.controller)};
+                }
+                if (effect.timing == EffectTiming::ON_RESOLVE) {
+                    applyEffect(target, effect);
+                } else {
+                    const auto due_turn = state_.turn + (state_.phase == Phase::END ? 1U : 0U);
+                    state_.scheduled_effects.push_back(
+                        {next_scheduled_id_++, item.card, item.controller, target, effect, due_turn});
+                    record(EventKind::SCHEDULED,
+                           card.name + " scheduled an end-of-turn effect for turn " + std::to_string(due_turn));
+                }
             }
         }
         owner.graveyard.push_back(item.card);
@@ -340,6 +412,7 @@ void Game::advancePhase() {
         state_.phase = Phase::COMBAT;
     } else if (state_.phase == Phase::COMBAT) {
         state_.phase = Phase::END;
+        enqueueEndTriggers();
     } else {
         auto& previous = state_.players[Index(state_.active)];
         while (previous.hand.size() > 8) {

@@ -199,7 +199,11 @@ void CheckInvalidReferences(const std::filesystem::path& manifest) {
 
 void CheckInvalidCards(const std::filesystem::path& manifest) {
     std::ifstream input(manifest);
-    const auto original = nlohmann::json::parse(input);
+    auto original = nlohmann::json::parse(input);
+    // Keep the original single-effect validation cases independent of the shipped mixed-effect examples.
+    original["cards"][0].erase("effects");
+    original["cards"][0]["effect"] = "damage";
+    original["cards"][0]["amount"] = 3;
     const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     const auto path = std::filesystem::temp_directory_path() / ("cardis-cards-" + suffix + ".json");
     struct TemporaryFile {
@@ -250,6 +254,67 @@ void CheckInvalidCards(const std::filesystem::path& manifest) {
         Check(rejected, "invalid card manifest accepted in case " + std::to_string(index));
     }
 }
+
+void CheckEffectSequences(const std::filesystem::path& manifest) {
+    auto cards = cardis::LoadCatalog(manifest);
+    const auto steps = cardis::EffectsOf(cards.front());
+    Check(steps.size() == 2 && steps[0].timing == cardis::EffectTiming::ON_RESOLVE &&
+              steps[1].timing == cardis::EffectTiming::END_OF_TURN && steps[0].amount == 2 && steps[1].amount == 1,
+          "mixed timing example was not loaded");
+    Check(cardis::EffectsOf(cards[1]).size() == 1 &&
+              cardis::EffectsOf(cards[1])[0].timing == cardis::EffectTiming::ON_RESOLVE,
+          "legacy cards must remain immediate on resolution");
+
+    std::ifstream input(manifest);
+    const auto original = nlohmann::json::parse(input);
+    const auto suffix = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto path = std::filesystem::temp_directory_path() / ("cardis-effects-" + suffix + ".json");
+    struct TemporaryFile {
+        std::filesystem::path path;
+        ~TemporaryFile() {
+            std::error_code error;
+            std::filesystem::remove(path, error);
+        }
+    } cleanup{path};
+    const std::vector<std::function<void(nlohmann::json&)>> invalid{
+        [](auto& value) { value["cards"][0]["effects"] = nlohmann::json::array(); },
+        [](auto& value) { value["cards"][0]["effects"] = "later"; },
+        [](auto& value) { value["cards"][0]["effects"][0]["timing"] = "on_click"; },
+        [](auto& value) { value["cards"][0]["effects"][0]["recipient"] = "anyone"; },
+        [](auto& value) { value["cards"][0]["effects"][0]["amount"] = 1.5; },
+        [](auto& value) { value["cards"][0]["effects"][0]["amount"] = 0; },
+        [](auto& value) { value["cards"][0]["effects"][0]["amount"] = 101; },
+        [](auto& value) { value["cards"][0]["effects"][0]["effect"] = "unknown"; },
+        [](auto& value) { value["cards"][0]["effect"] = "damage"; },
+        [](auto& value) { value["cards"][0]["effects"][1]["effect"] = "heal"; },
+        [](auto& value) {
+            for (auto& step : value["cards"][0]["effects"]) {
+                step["recipient"] = "controller";
+            }
+        },
+        [](auto& value) {
+            const auto step = value["cards"][0]["effects"][0];
+            for (int i = 0; i < 3; ++i) {
+                value["cards"][0]["effects"].push_back(step);
+            }
+        },
+        [](auto& value) { value["cards"][6]["effects"] = value["cards"][0]["effects"]; }};
+    for (const auto& corrupt : invalid) {
+        auto value = original;
+        corrupt(value);
+        {
+            std::ofstream output(path);
+            output << value.dump();
+        }
+        bool rejected = false;
+        try {
+            static_cast<void>(cardis::LoadCatalog(path));
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        Check(rejected, "invalid effect sequence accepted");
+    }
+}
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -258,6 +323,7 @@ int main(int argc, char* argv[]) {
         CheckLoadouts(argv[1]);
         CheckInvalidReferences(argv[1]);
         CheckInvalidCards(argv[1]);
+        CheckEffectSequences(argv[1]);
         std::cout << "Character ownership, rules, reset and manifest validation passed\n";
         return 0;
     } catch (const std::exception& error) {

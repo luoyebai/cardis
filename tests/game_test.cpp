@@ -14,6 +14,9 @@ namespace {
 using cardis::CardDefinition;
 using cardis::CardKind;
 using cardis::EffectKind;
+using cardis::EffectRecipient;
+using cardis::EffectStep;
+using cardis::EffectTiming;
 using cardis::Game;
 using cardis::Phase;
 using cardis::PlayerId;
@@ -395,6 +398,200 @@ void CheckNamedUniquenessAndValidation() {
     characters[0].skill_ids = {"missing"};
     CheckThrows([&] { Game bad(Fixture(), characters); }, "missing skill reference accepted");
 }
+
+void CheckMixedEffectsAndEndResponses() {
+    auto cards = Fixture();
+    cards[0].cost = 1;
+    cards[0].effects = {{EffectKind::DAMAGE, 2, EffectTiming::ON_RESOLVE, EffectRecipient::SELECTED},
+                        {EffectKind::HEAL, 1, EffectTiming::ON_RESOLVE, EffectRecipient::CONTROLLER},
+                        {EffectKind::DAMAGE, 3, EffectTiming::END_OF_TURN, EffectRecipient::SELECTED},
+                        {EffectKind::SHIELD, 2, EffectTiming::END_OF_TURN, EffectRecipient::CONTROLLER}};
+    cards[15].effect = EffectKind::DAMAGE;
+    auto game = Opening(cards, {0}, {15, 1});
+    Check(game.pass(FIRST).accepted, "opening response priority failed");
+    Cast(game, SECOND, 15, {FIRST});
+    PassTwice(game);
+    Check(game.state().players[0].life == 27, "mixed effect fixture failed to create missing life");
+    Check(!game.canCast(FIRST, InHand(game, FIRST, 0), FIRST).accepted,
+          "mixed effect card accepted the wrong selected side");
+    Cast(game, FIRST, 0, {SECOND});
+    PassTwice(game);
+    Check(game.state().players[0].life == 28 && game.state().players[1].life == 28 &&
+              game.state().players[0].mana == 0 && game.state().scheduled_effects.size() == 2,
+          "mixed immediate effects or delayed registration incorrect");
+    Check(game.state().players[0].graveyard.size() == 1, "original mixed spell did not enter graveyard once");
+    PassTwice(game);
+    Check(game.state().phase == Phase::COMBAT && game.state().stack.empty() && game.state().players[1].life == 28,
+          "end effects triggered before end phase");
+    PassTwice(game);
+    Check(game.state().phase == Phase::END && game.state().scheduled_effects.empty() &&
+              game.state().stack.size() == 2 && game.state().stack.back().kind == cardis::StackKind::TRIGGER &&
+              game.state().players[1].life == 28,
+          "end effects must enter stack before dealing damage");
+    Check(game.pass(FIRST).accepted, "end trigger response priority failed");
+    Cast(game, SECOND, 1, {SECOND});
+    PassTwice(game);
+    Check(game.state().players[1].shield == 3 && game.state().stack.size() == 2,
+          "response did not resolve ahead of delayed triggers");
+    PassTwice(game);
+    Check(game.state().players[1].life == 28 && game.state().players[1].shield == 0 &&
+              game.state().players[0].shield == 0 && game.state().stack.size() == 1,
+          "first delayed effect ignored shield or resolved multiple triggers at once");
+    PassTwice(game);
+    Check(game.state().players[0].shield == 2 && game.state().stack.empty() && game.state().players[0].mana == 0 &&
+              game.state().players[0].graveyard.size() == 1,
+          "controller trigger failed or charged the spell twice");
+    CheckConservation(game);
+
+    game.reset();
+    Cast(game, FIRST, 0, {SECOND});
+    PassTwice(game);
+    Check(game.state().scheduled_effects.size() == 2, "reset fixture did not schedule effects");
+    game.reset();
+    Check(game.state().scheduled_effects.empty() && game.state().stack.empty(), "reset retained delayed effects");
+    PassTwice(game);
+    PassTwice(game);
+    Check(game.state().stack.empty() && game.state().players[0].shield == 0 && game.state().players[1].life == 30,
+          "reset effects leaked into the next match");
+}
+
+void CheckDelayedStaleTargets() {
+    auto cards = Fixture();
+    cards[0].effects = {{EffectKind::DAMAGE, 1, EffectTiming::ON_RESOLVE, EffectRecipient::SELECTED},
+                        {EffectKind::DAMAGE, 2, EffectTiming::END_OF_TURN, EffectRecipient::SELECTED}};
+    auto stale_cast = Opening(cards, {0, 14}, {8});
+    NextTurn(stale_cast);
+    const auto original_target = Summon(stale_cast, SECOND, 8);
+    NextTurn(stale_cast);
+    Cast(stale_cast, FIRST, 0, {SECOND, original_target});
+    Cast(stale_cast, FIRST, 14, {SECOND, original_target});
+    PassTwice(stale_cast);
+    PassTwice(stale_cast);
+    Check(stale_cast.state().players[1].battlefield.empty() && stale_cast.state().scheduled_effects.empty() &&
+              stale_cast.state().players[1].life == 30 && stale_cast.state().players[0].graveyard.size() == 2,
+          "stale original target scheduled future effects or redirected damage");
+    CheckConservation(stale_cast);
+
+    auto stale_trigger = Opening(cards, {0, 14}, {3});
+    NextTurn(stale_trigger);
+    const auto delayed_target = Summon(stale_trigger, SECOND, 3);
+    NextTurn(stale_trigger);
+    Cast(stale_trigger, FIRST, 0, {SECOND, delayed_target});
+    PassTwice(stale_trigger);
+    Check(stale_trigger.state().scheduled_effects.size() == 1 &&
+              stale_trigger.state().players[1].battlefield[0].damage == 1,
+          "delayed unit target not registered after immediate damage");
+    Cast(stale_trigger, FIRST, 14, {SECOND, delayed_target});
+    PassTwice(stale_trigger);
+    Check(stale_trigger.state().players[1].battlefield.empty(), "delayed target survived fixture removal");
+    PassTwice(stale_trigger);
+    PassTwice(stale_trigger);
+    Check(stale_trigger.state().stack.size() == 1, "delayed effect skipped its response window");
+    PassTwice(stale_trigger);
+    Check(stale_trigger.state().players[1].life == 30 && stale_trigger.state().stack.empty() &&
+              stale_trigger.state().players[0].graveyard.size() == 2,
+          "dead delayed unit target became hero damage or duplicated source card");
+    CheckConservation(stale_trigger);
+}
+
+void CheckEffectsCreatedDuringEnd() {
+    auto cards = Fixture();
+    cards[0].effects = {{EffectKind::DAMAGE, 1, EffectTiming::ON_RESOLVE, EffectRecipient::SELECTED},
+                        {EffectKind::DAMAGE, 2, EffectTiming::END_OF_TURN, EffectRecipient::OPPONENT}};
+    auto game = Opening(cards, {0});
+    PassTwice(game);
+    PassTwice(game);
+    Check(game.state().phase == Phase::END, "fixture did not reach end phase");
+    Cast(game, FIRST, 0, {SECOND});
+    PassTwice(game);
+    Check(game.state().players[1].life == 29 && game.state().scheduled_effects.size() == 1 &&
+              game.state().scheduled_effects[0].due_turn == 2,
+          "effect created during end must wait for the next turn's end event");
+    PassTwice(game);
+    Check(game.state().turn == 2 && game.state().phase == Phase::MAIN && game.state().stack.empty() &&
+              game.state().players[1].life == 29,
+          "end-created effect incorrectly resolved on the same end step");
+    PassTwice(game);
+    PassTwice(game);
+    Check(game.state().stack.size() == 1 && game.state().players[1].life == 29,
+          "next end event did not create a respondable trigger");
+    PassTwice(game);
+    Check(game.state().players[1].life == 27 && game.state().players[0].graveyard.size() == 1,
+          "next-turn trigger failed or duplicated original card");
+    CheckConservation(game);
+}
+
+void CheckEndTriggerOrder() {
+    auto cards = Fixture();
+    cards[0].effects = {{EffectKind::DAMAGE, 1, EffectTiming::END_OF_TURN, EffectRecipient::SELECTED},
+                        {EffectKind::DAMAGE, 2, EffectTiming::END_OF_TURN, EffectRecipient::SELECTED}};
+    auto game = Opening(cards, {0}, {0});
+    Cast(game, FIRST, 0, {SECOND});
+    PassTwice(game);
+    Check(game.pass(FIRST).accepted, "nonactive spell priority failed");
+    Cast(game, SECOND, 0, {FIRST});
+    PassTwice(game);
+    PassTwice(game);
+    PassTwice(game);
+    Check(game.state().stack.size() == 4 && game.state().stack.back().controller == SECOND,
+          "nonactive player's end triggers must resolve before active player's triggers");
+    PassTwice(game);
+    Check(game.state().players[0].life == 29 && game.state().players[1].life == 30 && game.state().stack.size() == 3,
+          "first registered nonactive trigger did not resolve first");
+    PassTwice(game);
+    Check(game.state().players[0].life == 27 && game.state().stack.size() == 2 &&
+              game.state().stack.back().controller == FIRST,
+          "second nonactive trigger did not precede active player's triggers");
+    PassTwice(game);
+    Check(game.state().players[1].life == 29 && game.state().stack.size() == 1,
+          "first registered active trigger did not resolve first");
+    PassTwice(game);
+    Check(game.state().players[1].life == 27 && game.state().stack.empty(), "last active trigger failed");
+    CheckConservation(game);
+}
+
+void CheckEffectValidation() {
+    auto cards = Fixture();
+    const auto legacy = cardis::EffectsOf(cards[0]);
+    Check(legacy.size() == 1 && legacy[0].effect == EffectKind::DAMAGE && legacy[0].amount == 3 &&
+              legacy[0].timing == EffectTiming::ON_RESOLVE && legacy[0].recipient == EffectRecipient::SELECTED,
+          "legacy skill effect normalization changed");
+    const EffectStep selected{EffectKind::DAMAGE, 2, EffectTiming::ON_RESOLVE, EffectRecipient::SELECTED};
+    cards[0].effects = {selected};
+    cardis::ValidateCards(cards);
+    auto invalid = cards;
+    invalid[0].effects[0].effect = static_cast<EffectKind>(99);
+    CheckThrows([&] { cardis::ValidateCards(invalid); }, "unknown effect enum accepted");
+    invalid = cards;
+    invalid[0].effects[0].timing = static_cast<EffectTiming>(99);
+    CheckThrows([&] { cardis::ValidateCards(invalid); }, "unknown effect timing accepted");
+    invalid = cards;
+    invalid[0].effects[0].recipient = static_cast<EffectRecipient>(99);
+    CheckThrows([&] { cardis::ValidateCards(invalid); }, "unknown effect recipient accepted");
+    invalid = cards;
+    invalid[0].effects[0].amount = 0;
+    CheckThrows([&] { cardis::ValidateCards(invalid); }, "zero effect amount accepted");
+    invalid = cards;
+    invalid[0].effects[0].amount = 101;
+    CheckThrows([&] { cardis::ValidateCards(invalid); }, "out-of-range effect amount accepted");
+    invalid = cards;
+    invalid[0].effects.assign(5, selected);
+    CheckThrows([&] { cardis::ValidateCards(invalid); }, "more than four effect steps accepted");
+    invalid = cards;
+    invalid[0].effects[0].recipient = EffectRecipient::OPPONENT;
+    CheckThrows([&] { cardis::ValidateCards(invalid); }, "skill without selected target accepted");
+    invalid = cards;
+    invalid[0].effects.push_back({EffectKind::HEAL, 1, EffectTiming::END_OF_TURN, EffectRecipient::SELECTED});
+    CheckThrows([&] { cardis::ValidateCards(invalid); }, "mixed friendly and enemy selected targets accepted");
+    invalid = cards;
+    invalid[3].effects = {selected};
+    CheckThrows([&] { cardis::ValidateCards(invalid); }, "unsupported character spell effects accepted");
+    cards[0].effect = EffectKind::SHIELD;
+    auto game = Opening(cards, {0});
+    Check(game.canCast(FIRST, InHand(game, FIRST, 0), SECOND).accepted &&
+              !game.canCast(FIRST, InHand(game, FIRST, 0), FIRST).accepted,
+          "explicit effect selected side incorrectly used legacy effect fields");
+}
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -406,6 +603,11 @@ int main(int argc, char* argv[]) {
         CheckStaleTargetsAndSource();
         CheckHealingAndUnitShield();
         CheckNamedUniquenessAndValidation();
+        CheckMixedEffectsAndEndResponses();
+        CheckDelayedStaleTargets();
+        CheckEffectsCreatedDuringEnd();
+        CheckEndTriggerOrder();
+        CheckEffectValidation();
         Check(argc == 2, "manifest argument required");
         cardis::ValidateCards(cardis::LoadCatalog(argv[1]));
         auto runtime = cardis::CreateRuntime(argv[1]);

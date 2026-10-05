@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <fstream>
 #include <set>
 #include <stdexcept>
@@ -33,6 +34,29 @@ CardKind ParseKind(const std::string& value) {
     throw std::invalid_argument("Unknown card kind: " + value);
 }
 
+EffectTiming ParseTiming(const std::string& value) {
+    if (value == "on_resolve") {
+        return EffectTiming::ON_RESOLVE;
+    }
+    if (value == "end_of_turn") {
+        return EffectTiming::END_OF_TURN;
+    }
+    throw std::invalid_argument("Unknown effect timing: " + value);
+}
+
+EffectRecipient ParseRecipient(const std::string& value) {
+    if (value == "selected") {
+        return EffectRecipient::SELECTED;
+    }
+    if (value == "controller") {
+        return EffectRecipient::CONTROLLER;
+    }
+    if (value == "opponent") {
+        return EffectRecipient::OPPONENT;
+    }
+    throw std::invalid_argument("Unknown effect recipient: " + value);
+}
+
 int ReadInteger(const nlohmann::json& value, int minimum, int maximum) {
     if (!value.is_number_integer() || value < minimum || value > maximum) {
         throw std::invalid_argument("Card stat must be a bounded integer");
@@ -64,10 +88,33 @@ std::vector<CardDefinition> LoadCatalog(const std::filesystem::path& manifest) {
         card.kind = ParseKind(entry.value("kind", std::string("skill")));
         card.cost = ReadInteger(entry.at("cost"), 0, 10);
         if (card.kind == CardKind::CHARACTER) {
+            if (entry.contains("effects")) {
+                throw std::invalid_argument("Character effect sequences are not supported: " + card.id);
+            }
             card.attack = ReadInteger(entry.at("attack"), 0, 100);
             card.health = ReadInteger(entry.at("health"), 1, 100);
             card.guard = entry.value("guard", false);
             card.haste = entry.value("haste", false);
+        } else if (entry.contains("effects")) {
+            const auto& effects = entry.at("effects");
+            if (!effects.is_array() || effects.empty() || effects.size() > 4 || entry.contains("effect") ||
+                entry.contains("amount")) {
+                throw std::invalid_argument("Use either one effect or 1..4 effect steps: " + card.id);
+            }
+            for (const auto& step : effects) {
+                card.effects.push_back({ParseEffect(step.at("effect").get<std::string>()),
+                                        ReadInteger(step.at("amount"), 1, 100),
+                                        ParseTiming(step.at("timing").get<std::string>()),
+                                        ParseRecipient(step.value("recipient", std::string("selected")))});
+            }
+            // Legacy readers use the first selected effect for target selection and short summaries.
+            const auto selected = std::find_if(card.effects.begin(), card.effects.end(), [](const auto& step) {
+                return step.recipient == EffectRecipient::SELECTED;
+            });
+            if (selected != card.effects.end()) {
+                card.effect = selected->effect;
+                card.amount = selected->amount;
+            }
         } else {
             card.amount = ReadInteger(entry.at("amount"), 1, 100);
             card.effect = ParseEffect(entry.at("effect").get<std::string>());
