@@ -34,8 +34,14 @@ if(CARDIS_BUILD_CLIENT)
     add_library(cardis_gui STATIC apps/client/raygui.cpp)
     target_include_directories(cardis_gui SYSTEM PUBLIC ${raygui_SOURCE_DIR}/src)
     target_link_libraries(cardis_gui PUBLIC raylib)
+    # Motion toolkit and layout geometry. Both are graphics-free (raylib types
+    # only, no raylib calls), which keeps them testable without a GPU.
+    add_library(cardis_effects STATIC apps/client/effects.cpp)
+    target_include_directories(cardis_effects SYSTEM PUBLIC ${raylib_SOURCE_DIR}/src)
+    target_include_directories(cardis_effects PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/apps/client)
+    cardis_warnings(cardis_effects)
     add_executable(cardis apps/client/main.cpp)
-    target_link_libraries(cardis PRIVATE cardis_runtime cardis_gui)
+    target_link_libraries(cardis PRIVATE cardis_runtime cardis_gui cardis_effects)
     cardis_warnings(cardis)
     add_custom_target(cardis_assets ALL
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${PROJECT_SOURCE_DIR}/assets $<TARGET_FILE_DIR:cardis>/assets
@@ -60,5 +66,14 @@ if(BUILD_TESTING)
     target_link_libraries(cardis_character_tests PRIVATE cardis_runtime nlohmann_json::nlohmann_json)
     cardis_warnings(cardis_character_tests)
     add_test(NAME cardis_characters COMMAND cardis_character_tests ${PROJECT_SOURCE_DIR}/assets/cards.json)
+    if(CARDIS_BUILD_CLIENT)
+        # Motion and layout are graphics-free, so the client's own behaviour
+        # (curves, timers, particle budget, HUD geometry) is testable headlessly.
+        add_executable(cardis_client_tests tests/client_test.cpp)
+        target_link_libraries(cardis_client_tests PRIVATE cardis_effects)
+        cardis_warnings(cardis_client_tests)
+        add_test(NAME cardis_client COMMAND cardis_client_tests)
+        set_tests_properties(cardis_client PROPERTIES TIMEOUT 60)
+    endif()
     set_tests_properties(cardis_rules cardis_cli_smoke cardis_characters PROPERTIES TIMEOUT 60)
 endif()

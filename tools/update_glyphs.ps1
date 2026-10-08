@@ -1,7 +1,12 @@
 # Rebuild the font atlas character list after changing interface or card text.
+# tools/update_glyphs.py is the cross-platform equivalent and additionally
+# verifies every character against the font's cmap.
 $project_root = Split-Path -Parent $PSScriptRoot
 $text_files = @(
     (Join-Path $project_root 'apps/client/main.cpp'),
+    (Join-Path $project_root 'apps/client/effects.cpp'),
+    (Join-Path $project_root 'apps/client/effects.hpp'),
+    (Join-Path $project_root 'apps/client/layout.hpp'),
     (Join-Path $project_root 'src/core/game.cpp'),
     (Join-Path $project_root 'assets/cards.json'),
     (Join-Path $project_root 'assets/characters.json')

@@ -19,6 +19,11 @@ Cordis 管理服务生命周期，独立规则引擎处理阶段、优先权、�
 - 目标选择、分页手牌、行动提示、结算记录、角色资料和清晰中文字体。
 - 固定种子重开；CLI 自动对战跑完整局；规则及资源校验测试。
 
+界面按对局状态给出即时反馈：血条、护盾格与灵力格缓动到新数值，受伤闪红、飘字与落败震屏，
+召唤入场、退场溶解、结算光束与终局庆祝；双方各自的角色色调构成舞台光，行动方所在半场更亮。
+牌面详情固定显示在左下角面板，悬停或选中手牌即可查看，不会遮住战场。按 F 或启动时加 `--no-fx`
+切换低动效模式：保留颜色与透明度反馈，去掉位移、震屏与粒子。
+
 这是玩法验证首版。装备、场地、羁绊/连携、属性克制、特殊胜利、组牌界面、换牌、AI 对手、联网和成长系统尚未实现。
 CLI 的自动行动策略仅用于测试，不是桌面客户端的 AI。
 
@@ -50,6 +55,21 @@ ctest --preset headless
 ```
 
 Linux 桌面版需要 raylib / GLFW 的 OpenGL、X11 开发包。CI 配置包含 Windows 桌面与 Linux 无窗口构建。
+
+无显卡环境可用 Mesa 软件渲染跑出界面截图（smoke 模式渲染 4 帧后退出）：
+
+```sh
+__GLX_VENDOR_LIBRARY_NAME=mesa LIBGL_ALWAYS_SOFTWARE=1 \
+  ./build/dev/cardis assets/cards.json --smoke-battle shots.png
+```
+
+## 界面与特效
+
+- 玩家条：头像、生命条（按最大生命分格，显示刚失去的部分）、护盾格、灵力格（可用上限点亮），持有优先权的一侧带角色色调呼吸描边。
+- 战场：角色卡带生命条、守护/疾奏标签与状态文字；中央分隔带是结算栈轨道，按顺序显示待结算对象。
+- 右栏：阶段步进器（主要 / 战斗 / 结束）、响应栈、回合末待触发；左栏下方面板悬停显示牌面完整效果。
+- 动效：召唤入场、受伤闪红与飘字、护盾与治疗反馈、退场溶解、结算光束、落败震屏、终局庆祝与交接倒计时环。
+- 低动效：按 F 或 `--no-fx`，只保留颜色与透明度反馈。动效层的曲线、计时与几何由 `cardis_client` 测试在无图形环境下验证。
 
 ## 操作与规则
 
@@ -89,13 +109,14 @@ Linux 桌面版需要 raylib / GLFW 的 OpenGL、X11 开发包。CI 配置包含
 
 assets/cards.json 定义卡牌数值与类型；assets/characters.json 定义角色资料、技能归属、初始生命与灵力最终上限。
 空 character_id 为通用卡；起始牌组由所有通用卡及本角色专属卡构成，每种两张，必须恰好 30 张。
-新增中文文案后执行 tools/update_glyphs.ps1。字体遵循 SIL OFL；立绘来源见 [assets/SOURCES.md](assets/SOURCES.md)，图片权利仍归原权利人。
+新增中文文案后执行 `python3 tools/update_glyphs.py`（Windows 亦可用 tools/update_glyphs.ps1），它会重建字形表并校验字体是否包含每个字符。字体遵循 SIL OFL；立绘来源见 [assets/SOURCES.md](assets/SOURCES.md)，图片权利仍归原权利人。
 
 遵循[指定 C++ 代码规范](https://luoyebai.github.io/posts/cpp-python-code-style/)：类型大驼峰、成员函数小驼峰、全局函数大驼峰、变量 snake_case、私有成员后缀 _、枚举全大写、RAII、自包含 .hpp。
 
 - src/core / include/cardis/core：权威规则状态及命令校验。
 - src/content：JSON 加载；src/runtime：Cordis 服务适配。
-- apps/client：桌面界面；apps/cli：有步数上限的完整对战模拟。
-- tests：规则、角色、清单与服务生命周期测试。
+- apps/client：桌面界面；main.cpp 只负责布局与绘制，effects.hpp / effects.cpp 是动效状态机，layout.hpp 是几何来源。
+- apps/cli：有步数上限的完整对战模拟。
+- tests：规则、角色、清单与服务生命周期测试；client_test.cpp 在无图形环境下验证曲线、计时、粒子预算与 HUD 几何。
 
 详见 [架构](docs/architecture.md)、[角色配置](docs/characters.md)、[资源字段](assets/README.md)。
